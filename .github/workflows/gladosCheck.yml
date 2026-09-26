@@ -52,6 +52,7 @@ jobs:
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
         GLADOS_VERBOSE: ${{ secrets.GLADOS_VERBOSE }}
+        WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
 
     - name: Keep alive
       uses: liskin/gh-workflow-keepalive@v1 
