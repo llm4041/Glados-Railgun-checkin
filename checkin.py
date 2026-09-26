@@ -95,6 +95,8 @@ class Config:
     """应用配置"""
 
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
+    """新增：企业微信webhook"""
+    ENV_WEBHOOK = "WEBHOOK_URL"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_VERBOSE = "GLADOS_VERBOSE"
@@ -395,7 +397,28 @@ class PushService:
 
     def __init__(self, config: Config):
         self.config = config
-
+        
+    def send_wecom(self, title: str, content: str) -> bool:
+        """企业微信机器人推送"""
+        webhook = self.config.webhook_url
+        if not webhook:
+            return False
+        try:
+            # 企业微信标准报文格式
+            payload = {
+                "msgtype": "text",
+                "text": {
+                    "content": f"{title}\n{content}"
+                }
+            }
+            resp = requests.post(webhook, json=payload, timeout=10)
+            resp.raise_for_status()
+            logger.info(f"{LogEmoji.SUCCESS} 企业微信推送发送成功。")
+            return True
+        except Exception as e:
+            logger.error(f"{LogEmoji.ERROR} 企业微信推送失败: {e}")
+            return False
+            
     def send(self, title: str, content: str) -> bool:
         """发送推送"""
         if not self.config.push_key:
