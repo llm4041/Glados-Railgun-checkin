@@ -90,35 +90,29 @@ def log_method(func):
 
     return wrapper
 
-
 class Config:
     """应用配置"""
-
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     """新增：企业微信webhook"""
     ENV_WEBHOOK = "WEBHOOK_URL"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_VERBOSE = "GLADOS_VERBOSE"
-
     """默认兑换计划"""
     DEFAULT_EXCHANGE_PLAN = "plan500"
-
     """默认是否输出详细响应"""
     DEFAULT_VERBOSE = False
-
     """默认域名"""
     DOMAINS = ["glados.cloud", "railgun.info"]
-
     """兑换计划列表"""
     EXCHANGE_PLANS = {
         ExchangePlan.PLAN100.value: 100,
         ExchangePlan.PLAN200.value: 200,
         ExchangePlan.PLAN500.value: 500,
     }
-
     def __init__(self):
         self.push_key: str = ""
+        self.webhook_url: str = "" # 新增
         self.cookies_list: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
         self.verbose: bool = self.DEFAULT_VERBOSE
@@ -127,16 +121,24 @@ class Config:
     def _load_config(self) -> None:
         """加载配置"""
         push_key_env: Optional[str] = os.environ.get(self.ENV_PUSH_KEY)
+        webhook_env: Optional[str] = os.environ.get(self.ENV_WEBHOOK) # 新增读取webhook
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
+
+        # 加载企业微信webhook
+        if not webhook_env:
+            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_WEBHOOK}' 未设置。")
+            self.webhook_url = ""
+        else:
+            self.webhook_url = webhook_env
+            logger.info(f"{LogEmoji.SUCCESS} WEBHOOK_URL 已加载")
 
         if not push_key_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_PUSH_KEY}' 未设置。")
             self.push_key = ""
         else:
             self.push_key = push_key_env
-
         if not raw_cookies_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
             self.cookies_list = []
@@ -144,7 +146,6 @@ class Config:
             self.cookies_list = [cookie.strip() for cookie in raw_cookies_env.split("&") if cookie.strip()]
             if not self.cookies_list:
                 raise ValueError(f"环境变量 '{self.ENV_COOKIES}' 已设置，但未包含任何有效的 Cookie。")
-
         if not exchange_plan_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 未设置，将使用默认兑换计划 {self.DEFAULT_EXCHANGE_PLAN}。")
             self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
@@ -155,11 +156,10 @@ class Config:
             else:
                 logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，将使用默认兑换计划 {self.DEFAULT_EXCHANGE_PLAN}。")
                 self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
-
         logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.cookies_list)} 个 Cookie 用于签到。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
+        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_WEBHOOK} {'已设置' if webhook_env else '未设置'}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
-
         if verbose_env is not None:
             verbose_env_lower = verbose_env.lower()
             if verbose_env_lower in ["true", "1", "yes", "y"]:
@@ -168,9 +168,7 @@ class Config:
                 self.verbose = False
             else:
                 logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_VERBOSE}' 的值 '{verbose_env}' 无效，将使用默认值 {self.DEFAULT_VERBOSE}。")
-
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
-
 
 class API:
     """API 调用"""
@@ -394,7 +392,6 @@ class CheckinResult:
 
 class PushService:
     """推送服务"""
-
     def __init__(self, config: Config):
         self.config = config
         
@@ -420,11 +417,15 @@ class PushService:
             return False
             
     def send(self, title: str, content: str) -> bool:
-        """发送推送"""
+        """发送推送：优先企业微信webhook"""
+        # 优先企业微信
+        if self.config.webhook_url:
+            return self.send_wecom(title, content)
+
+        # 没有webhook才走PushDeer
         if not self.config.push_key:
             logger.info(f"{LogEmoji.WARNING} 未设置推送密钥，跳过推送通知。")
             return False
-
         try:
             pushdeer = PushDeer(pushkey=self.config.push_key)
             pushdeer.send_text(title, desp=content)
