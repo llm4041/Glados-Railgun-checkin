@@ -1,0 +1,4 @@
+# GLaDOS 自动签到依赖
+requests
+pypushdeer
+serverchan-sdk

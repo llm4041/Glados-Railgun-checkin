@@ -1,11 +1,14 @@
-import requests
-import json
 import os
-import logging
+import sys
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
-from dataclasses import dataclass, asdict
+
+import requests
 from pypushdeer import PushDeer
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from logging_config import init_logger
 
 
@@ -49,9 +52,9 @@ class LogEmoji:
     END = "🏁"
     COOKIE = "🍪"
     DOMAIN = "🌐"
-    WARNING = "⚠️ "
+    WARNING = "⚠️"
     ERROR = "🔴"
-    INFO = "ℹ️ "
+    INFO = "ℹ️"
 
 
 def log_method(func):
@@ -90,30 +93,37 @@ def log_method(func):
 
     return wrapper
 
+
 class Config:
     """应用配置"""
+
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
-    """新增：企业微信webhook"""
+    ENV_SERVERCHAN_KEY = "SERVERCHAN_SENDKEY"
     ENV_WEBHOOK = "WEBHOOK_URL"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_VERBOSE = "GLADOS_VERBOSE"
-    """默认兑换计划"""
-    DEFAULT_EXCHANGE_PLAN = "plan500"
+
+    """默认兑换计划（none 表示不自动兑换）"""
+    DEFAULT_EXCHANGE_PLAN = "none"
+
     """默认是否输出详细响应"""
     DEFAULT_VERBOSE = False
+
     """默认域名"""
-    # DOMAINS = ["glados.cloud", "railgun.info"]
     DOMAINS = ["glados.cloud"]
+
     """兑换计划列表"""
     EXCHANGE_PLANS = {
         ExchangePlan.PLAN100.value: 100,
         ExchangePlan.PLAN200.value: 200,
         ExchangePlan.PLAN500.value: 500,
     }
+
     def __init__(self):
         self.push_key: str = ""
-        self.webhook_url: str = "" # 新增
+        self.serverchan_key: str = ""
+        self.webhook_url: str = ""
         self.cookies_list: List[str] = []
         self.exchange_plan: str = self.DEFAULT_EXCHANGE_PLAN
         self.verbose: bool = self.DEFAULT_VERBOSE
@@ -122,24 +132,30 @@ class Config:
     def _load_config(self) -> None:
         """加载配置"""
         push_key_env: Optional[str] = os.environ.get(self.ENV_PUSH_KEY)
-        webhook_env: Optional[str] = os.environ.get(self.ENV_WEBHOOK) # 新增读取webhook
+        serverchan_key_env: Optional[str] = os.environ.get(self.ENV_SERVERCHAN_KEY)
+        webhook_env: Optional[str] = os.environ.get(self.ENV_WEBHOOK)
         raw_cookies_env: Optional[str] = os.environ.get(self.ENV_COOKIES)
         exchange_plan_env: Optional[str] = os.environ.get(self.ENV_EXCHANGE_PLAN)
         verbose_env: Optional[str] = os.environ.get(self.ENV_VERBOSE)
-
-        # 加载企业微信webhook
-        if not webhook_env:
-            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_WEBHOOK}' 未设置。")
-            self.webhook_url = ""
-        else:
-            self.webhook_url = webhook_env
-            logger.info(f"{LogEmoji.SUCCESS} WEBHOOK_URL 已加载")
 
         if not push_key_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_PUSH_KEY}' 未设置。")
             self.push_key = ""
         else:
             self.push_key = push_key_env
+
+        if not serverchan_key_env:
+            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_SERVERCHAN_KEY}' 未设置。")
+            self.serverchan_key = ""
+        else:
+            self.serverchan_key = serverchan_key_env
+
+        if not webhook_env:
+            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_WEBHOOK}' 未设置。")
+            self.webhook_url = ""
+        else:
+            self.webhook_url = webhook_env
+
         if not raw_cookies_env:
             logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
             self.cookies_list = []
@@ -147,20 +163,22 @@ class Config:
             self.cookies_list = [cookie.strip() for cookie in raw_cookies_env.split("&") if cookie.strip()]
             if not self.cookies_list:
                 raise ValueError(f"环境变量 '{self.ENV_COOKIES}' 已设置，但未包含任何有效的 Cookie。")
+
         if not exchange_plan_env:
-            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 未设置，将使用默认兑换计划 {self.DEFAULT_EXCHANGE_PLAN}。")
+            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 未设置，将使用默认设置（不自动兑换）。")
             self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
         else:
             if exchange_plan_env in self.EXCHANGE_PLANS:
                 self.exchange_plan = exchange_plan_env
                 logger.info(f"{LogEmoji.SUCCESS} 使用指定的兑换计划: {self.exchange_plan}")
             else:
-                logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，将使用默认兑换计划 {self.DEFAULT_EXCHANGE_PLAN}。")
+                logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 的值 '{exchange_plan_env}' 无效，将跳过自动兑换。")
                 self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
+
         logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.cookies_list)} 个 Cookie 用于签到。")
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}。")
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_WEBHOOK} {'已设置' if webhook_env else '未设置'}。")
+        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if push_key_env else '未设置'}，{self.ENV_SERVERCHAN_KEY} {'已设置' if serverchan_key_env else '未设置'}，{self.ENV_WEBHOOK} {'已设置' if webhook_env else '未设置'}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
+
         if verbose_env is not None:
             verbose_env_lower = verbose_env.lower()
             if verbose_env_lower in ["true", "1", "yes", "y"]:
@@ -169,7 +187,19 @@ class Config:
                 self.verbose = False
             else:
                 logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_VERBOSE}' 的值 '{verbose_env}' 无效，将使用默认值 {self.DEFAULT_VERBOSE}。")
+
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
+
+
+# 各平台合法 User-Agent（版本号无关，仅平台 token 关键）
+PLATFORM_UA = {
+    "Windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "macOS": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Linux": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "iPhone": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Android": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+}
+
 
 class API:
     """API 调用"""
@@ -184,8 +214,20 @@ class API:
         self.cookie_index: int = cookie_index
         self.verbose: bool = verbose
         self.headers: Dict[str, str] = self._get_headers()
+        self._device_ua_cache: Dict[str, str] = {}
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        # 网络抖动时自动重试（指数退避），避免误报失败
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET", "POST"),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def __del__(self):
         """关闭 session"""
@@ -212,13 +254,14 @@ class API:
         """获取请求头"""
         return {
             "origin": f"https://{self.domain}",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36",
+            "user-agent": PLATFORM_UA["Windows"],
         }
 
     def _log(self, level: str, emoji: str, message: str, force: bool = False) -> None:
         """统一日志输出方法"""
 
-        log_message = f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}] {emoji} {message}"
+        prefix = f"{LogEmoji.COOKIE}[{self.cookie_index}] {LogEmoji.DOMAIN}[{self.domain}]"
+        log_message = f"{prefix} {emoji} {message}"
 
         if force or self.verbose:
             if level == "info":
@@ -232,9 +275,11 @@ class API:
         """获取完整 URL"""
         return f"https://{self.domain}{path}"
 
-    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "") -> Optional[requests.Response]:
+    def _make_request(self, url: str, method: str, data: Optional[Dict] = None, cookies: str = "", user_agent: Optional[str] = None) -> Optional[requests.Response]:
         """发送 HTTP 请求"""
         session_headers = self.headers.copy()
+        if user_agent:
+            session_headers["user-agent"] = user_agent
         session_headers["cookie"] = cookies
 
         try:
@@ -260,47 +305,95 @@ class API:
 
     @log_method
     def checkin(self, cookies: str) -> Dict[str, Union[str, CheckinStatus]]:
-        """执行签到"""
+        """执行签到，含设备平台自适应重试"""
         url = self._get_full_url(self.CHECKIN_URL)
         checkin_data = self._get_checkin_data()
-        response = self._make_request(url, "POST", checkin_data, cookies)
 
-        result = {
+        # 起始 UA 优先复用已学得的设备 UA，否则用会话默认 UA
+        start_ua = self._device_ua_cache.get("_last") or self.headers.get("user-agent")
+
+        raw = self._checkin_attempt(url, checkin_data, cookies, start_ua)
+
+        # 设备不匹配(code 4)时按服务端 loginDevice 切换 UA 重试一次
+        if raw is not None and raw.get("code") == 4 and raw.get("reason") == "device-mismatch":
+            login_device = raw.get("loginDevice")
+            recover_ua = self._device_ua_cache.get(login_device) or PLATFORM_UA.get(login_device)
+            if recover_ua and recover_ua != start_ua:
+                self._log("warning", LogEmoji.WARNING, f"设备平台不匹配 (loginDevice={login_device})，切换 UA 重试", force=True)
+                raw = self._checkin_attempt(url, checkin_data, cookies, recover_ua)
+
+        return self._parse_checkin(raw)
+
+    def _checkin_attempt(self, url: str, data: Dict, cookies: str, user_agent: str) -> Optional[Dict]:
+        """发起一次签到请求并返回解析后的响应体（失败返回 None）"""
+        response = self._make_request(url, "POST", data, cookies, user_agent=user_agent)
+        if not response:
+            return None
+        try:
+            raw = response.json()
+        except ValueError:
+            self._log("error", LogEmoji.ERROR, "签到响应解析失败", force=True)
+            return None
+
+        # 缓存学得的设备 UA，供本次运行后续请求复用
+        if raw.get("code") == 4 and raw.get("reason") == "device-mismatch":
+            login_device = raw.get("loginDevice")
+            if login_device in PLATFORM_UA:
+                self._device_ua_cache[login_device] = PLATFORM_UA[login_device]
+        elif raw.get("code") in (CheckinStatus.SUCCESS.value, CheckinStatus.REPEAT.value):
+            self._device_ua_cache["_last"] = user_agent
+
+        return raw
+
+    def _parse_checkin(self, raw: Optional[Dict]) -> Dict[str, Union[str, CheckinStatus]]:
+        """解析签到响应为结果字典"""
+        result: Dict[str, Union[str, CheckinStatus]] = {
             "status": "签到失败",
             "points": "0",
             "message": "",
             "code": CheckinStatus.FAILURE,
         }
 
-        if response:
-            data = response.json()
-            code = data.get("code", -2)
-            message = data.get("message", "无消息字段")
-            points = str(data.get("points", 0))
+        if not raw:
+            result["message"] = "网络请求失败"
+            return result
 
-            if code == CheckinStatus.SUCCESS.value:
-                self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points}, message : {message} }}")
-                result["code"] = CheckinStatus.SUCCESS
-                result["status"] = "签到成功"
-                result["points"] = points
-                result["message"] = message
-            elif code == CheckinStatus.REPEAT.value:
-                self._log("info", LogEmoji.REPEAT, f"{{ code : {code}, message : {message} }}", force=True)
-                result["code"] = CheckinStatus.REPEAT
-                result["status"] = "重复签到"
-                result["points"] = "0"
-                result["message"] = message
-            else:
-                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
-                result["code"] = CheckinStatus.FAILURE
-                result["status"] = "签到失败"
-                result["points"] = "0"
-                result["message"] = message
+        code = raw.get("code", -2)
+        message = raw.get("message", "无消息字段")
+        points = str(raw.get("points", 0))
+
+        if code == CheckinStatus.SUCCESS.value:
+            self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, points : {points}, message : {message} }}")
+            result["code"] = CheckinStatus.SUCCESS
+            result["status"] = "签到成功"
+            result["points"] = points
+            result["message"] = message
+        elif code == CheckinStatus.REPEAT.value:
+            self._log("info", LogEmoji.REPEAT, f"{{ code : {code}, message : {message} }}", force=True)
+            result["code"] = CheckinStatus.REPEAT
+            result["status"] = "重复签到"
+            result["points"] = "0"
+            result["message"] = message
         else:
-            self._log("warning", LogEmoji.WARNING, "签到失败", force=True)
+            # 失败分支：按 code 细分诊断，便于快速定位根因
+            if code == 4:
+                reason = raw.get("reason")
+                if reason == "device-mismatch":
+                    login_device = raw.get("loginDevice") or "未知"
+                    if login_device in PLATFORM_UA:
+                        self._log("error", LogEmoji.ERROR, f"设备平台不匹配(loginDevice={login_device})，重试后仍失败，请确认登录设备平台", force=True)
+                    else:
+                        self._log("error", LogEmoji.ERROR, f"设备平台不匹配(loginDevice={login_device} 不在支持列表)，无法自动切换 UA；请提交相关截图到本项目 issue 以便作者更新设备列表", force=True)
+                else:
+                    self._log("error", LogEmoji.ERROR, f"服务端拒绝签到(code=4, reason={reason})，请检查账户风控状态", force=True)
+            elif code == -2:
+                self._log("error", LogEmoji.ERROR, f"无权限(code=-2)：Cookie 可能已失效，请重新登录 {self.domain} 刷新 Cookie 并更新仓库 Secret GLADOS_COOKIES 后重试", force=True)
+            else:
+                self._log("error", LogEmoji.ERROR, f"未预期响应(code={code}, message={message})，请检查 GLaDOS 服务状态或 Cookie", force=True)
             result["code"] = CheckinStatus.FAILURE
             result["status"] = "签到失败"
-            result["message"] = "网络请求失败"
+            result["points"] = "0"
+            result["message"] = message
 
         return result
 
@@ -321,10 +414,10 @@ class API:
                 self._log("info", LogEmoji.SUCCESS, f"{{ code : {code}, leftDays : {left_days_int} 天}}")
                 return f"{left_days_int} 天", code
             else:
-                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, leftDays : {left_days} 天}}", force=True)
+                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, leftDays : {left_days} 天}}")
                 return "None 天", code
         else:
-            self._log("warning", LogEmoji.WARNING, "获取状态失败", force=True)
+            self._log("warning", LogEmoji.WARNING, "获取状态失败")
             return "None 天", -2
 
     @log_method
@@ -345,10 +438,10 @@ class API:
                 points_num = points_int
                 return points_str, points_num
             else:
-                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, points : {points} 积分}}", force=True)
+                self._log("info", LogEmoji.FAIL, f"{{ code : {code}, points : {points} 积分}}")
                 return "None 积分", 0
         else:
-            self._log("warning", LogEmoji.WARNING, "获取积分失败", force=True)
+            self._log("warning", LogEmoji.WARNING, "获取积分失败")
             return "None 积分", 0
 
     @log_method
@@ -391,50 +484,138 @@ class CheckinResult:
         return result_dict
 
 
-class PushService:
-    """推送服务"""
-    def __init__(self, config: Config):
-        self.config = config
-        
-    def send_wecom(self, title: str, content: str) -> bool:
-        """企业微信机器人推送"""
-        webhook = self.config.webhook_url
-        if not webhook:
-            return False
-        try:
-            # 企业微信标准报文格式
-            payload = {
-                "msgtype": "text",
-                "text": {
-                    "content": f"{title}\n{content}"
-                }
-            }
-            resp = requests.post(webhook, json=payload, timeout=10)
-            resp.raise_for_status()
-            logger.info(f"{LogEmoji.SUCCESS} 企业微信推送发送成功。")
-            return True
-        except Exception as e:
-            logger.error(f"{LogEmoji.ERROR} 企业微信推送失败: {e}")
-            return False
-            
-    def send(self, title: str, content: str) -> bool:
-        """发送推送：优先企业微信webhook"""
-        # 优先企业微信
-        if self.config.webhook_url:
-            return self.send_wecom(title, content)
+def render_payload(payload: dict, line_sep: str = "\n") -> str:
+    """将结构化签到结果渲染为文本。line_sep 控制行分隔：
+    PushDeer 用 \\n（原生换行），Server酱 用 '  \\n'（Markdown 硬换行，避免段间空行）。"""
+    lines = []
+    for r in payload.get("rows", []):
+        line = (
+            f"#{r['index']:<2}  {r['emoji']} {r['status']:<6}  {r['domain']:<13}  "
+            f"获得 {r['points']} 积分 · 剩余 {r['days']} · 总 {r['points_total']}"
+        )
+        if r.get("exchange"):
+            line += f" · {r['exchange']}"
+        lines.append(line)
+    note = payload.get("note")
+    if note:
+        lines.append(note)
+    return line_sep.join(lines)
 
-        # 没有webhook才走PushDeer
-        if not self.config.push_key:
-            logger.info(f"{LogEmoji.WARNING} 未设置推送密钥，跳过推送通知。")
-            return False
+
+class PushBackend:
+    """推送后端抽象基类（策略模式）"""
+
+    name: str = "base"
+
+    def send(self, title: str, payload: dict) -> bool:
+        """发送推送，返回是否成功（由子类实现）"""
+        raise NotImplementedError
+
+    def _render(self, payload: dict) -> str:
+        """将结构化结果渲染为本后端适用的文本（子类可重写行分隔方式）"""
+        return render_payload(payload, "\n")
+
+
+class PushDeerBackend(PushBackend):
+    """PushDeer 后端（官方 pypushdeer 库）"""
+
+    name = "PushDeer"
+
+    def __init__(self, push_key: str):
+        self.push_key = push_key
+
+    def send(self, title: str, payload: dict) -> bool:
         try:
-            pushdeer = PushDeer(pushkey=self.config.push_key)
-            pushdeer.send_text(title, desp=content)
-            logger.info(f"{LogEmoji.SUCCESS} 推送通知发送成功。")
+            PushDeer(pushkey=self.push_key).send_text(title, desp=self._render(payload))
             return True
         except Exception as e:
-            logger.error(f"{LogEmoji.ERROR} 发送推送通知失败: {e}")
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
             return False
+
+
+class ServerChanBackend(PushBackend):
+    """Server酱 后端（官方 serverchan_sdk）"""
+
+    name = "Server酱"
+
+    def __init__(self, send_key: str):
+        self.send_key = send_key
+
+    def _render(self, payload: dict) -> str:
+        # Server酱 按 Markdown 渲染，单 \n 不换行；用行尾两空格+\n 做硬换行，避免段间空行
+        return render_payload(payload, "  \n")
+
+    def send(self, title: str, payload: dict) -> bool:
+        # 延迟导入：未安装 SDK 时不阻断其他后端（如 PushDeer）
+        try:
+            from serverchan_sdk import sc_send
+        except ImportError:
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 未安装 serverchan_sdk，请先执行 pip install serverchan-sdk。")
+            return False
+        try:
+            resp = sc_send(sendkey=self.send_key, title=title, desp=self._render(payload))
+            if isinstance(resp, dict) and resp.get("code") == 0:
+                return True
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 接口返回 {resp}")
+            return False
+        except Exception as e:
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
+            return False
+
+
+class WecomBackend(PushBackend):
+    """企业微信群机器人 Webhook 后端"""
+
+    name = "企业微信"
+
+    def __init__(self, webhook_url: str):
+        self.webhook_url = webhook_url
+
+    def send(self, title: str, payload: dict) -> bool:
+        try:
+            resp = requests.post(
+                self.webhook_url,
+                json={"msgtype": "text", "text": {"content": f"{title}\n{self._render(payload)}"}},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("errcode") == 0:
+                return True
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 接口返回 {data}")
+            return False
+        except Exception as e:
+            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
+            return False
+
+
+class PushService:
+    """推送服务：聚合多个后端，向全部已配置后端发送（都发）"""
+
+    def __init__(self, config: Config):
+        self.backends: List[PushBackend] = []
+        if config:
+            if getattr(config, "push_key", ""):
+                self.backends.append(PushDeerBackend(config.push_key))
+            if getattr(config, "serverchan_key", ""):
+                self.backends.append(ServerChanBackend(config.serverchan_key))
+            if getattr(config, "webhook_url", ""):
+                self.backends.append(WecomBackend(config.webhook_url))
+
+    def send(self, title: str, payload: dict) -> bool:
+        """向所有已配置后端发送推送，只要有一个成功即视为成功"""
+        if not self.backends:
+            logger.info(f"{LogEmoji.WARNING} 未配置推送密钥，跳过。")
+            return False
+
+        backend_names = "、".join(b.name for b in self.backends)
+        logger.info(f"{LogEmoji.INFO} 已配置 {len(self.backends)} 个后端（{backend_names}），开始发送")
+        results = [backend.send(title, payload) for backend in self.backends]
+        if any(results):
+            logger.info(f"{LogEmoji.SUCCESS} 发送完成：{sum(results)}/{len(results)} 个后端成功")
+            return True
+        logger.error(f"{LogEmoji.ERROR} 全部后端发送失败")
+        return False
 
 
 class Checker:
@@ -481,31 +662,31 @@ class Checker:
         result = CheckinResult(cookie_idx, domain)
 
         with API(domain, cookie_idx, verbose=self.config.verbose) as api:
-            # 1. 获取状态
             self._log(cookie_idx, domain, LogEmoji.STATUS, "查询剩余天数")
             days_str, status_code = api.get_status(cookie)
             result.days = days_str
 
-            # 2. 签到
             self._log(cookie_idx, domain, LogEmoji.CHECKIN, "执行签到")
             checkin_result = api.checkin(cookie)
             result.status = checkin_result["status"]
             result.code = checkin_result.get("code", CheckinStatus.FAILURE)
 
-            # 3. 获取积分
             self._log(cookie_idx, domain, LogEmoji.POINTS, "查询总积分")
             points_str, points_num = api.get_points(cookie)
             result.points_total = points_str
 
-            # 4. 执行兑换
-            required_points = self.config.EXCHANGE_PLANS.get(self.config.exchange_plan, 500)
-            self._log(
-                cookie_idx,
-                domain,
-                LogEmoji.EXCHANGE,
-                f"开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)",
-            )
-            result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
+            if self.config.exchange_plan in self.config.EXCHANGE_PLANS:
+                required_points = self.config.EXCHANGE_PLANS[self.config.exchange_plan]
+                self._log(
+                    cookie_idx,
+                    domain,
+                    LogEmoji.EXCHANGE,
+                    f"开始兑换 {self.config.exchange_plan} (需要 {required_points} 积分)",
+                )
+                result.exchange = api.exchange(cookie, self.config.exchange_plan, required_points)
+            else:
+                result.exchange = "未配置兑换计划，跳过自动兑换"
+                self._log(cookie_idx, domain, LogEmoji.INFO, "未配置兑换计划，跳过自动兑换")
 
         return result
 
@@ -513,67 +694,77 @@ class Checker:
         """获取所有结果"""
         return [result.to_dict() for result in self.results]
 
-    def format_results(self) -> Tuple[str, str, str]:
-        """格式化结果"""
+    def format_results(self) -> dict:
+        """格式化结果为结构化 payload（表现交给各推送后端/日志各自渲染）"""
         results = self.get_results()
 
         success_count = sum(1 for r in results if r["code"] == CheckinStatus.SUCCESS)
         repeat_count = sum(1 for r in results if r["code"] == CheckinStatus.REPEAT)
         fail_count = sum(1 for r in results if r["code"] == CheckinStatus.FAILURE)
 
-        title = f"GLaDOS 签到, 成功{success_count}, 失败{fail_count}, 重复{repeat_count}"
+        status_emoji_map = {
+            CheckinStatus.SUCCESS: LogEmoji.SUCCESS,
+            CheckinStatus.REPEAT: LogEmoji.REPEAT,
+            CheckinStatus.FAILURE: LogEmoji.ERROR,
+        }
+        title = f"GLaDOS 签到 · 成功 {success_count} · 失败 {fail_count} · 重复 {repeat_count}"
 
-        send_content_lines = []
-        log_content_lines = []
+        rows = []
         for i, res in enumerate(results, 1):
-            line = f"#{i} P:{res['points']} 剩余:{res['days']} 总积分:{res['points_total']} | {res['status']} | {res['exchange']}"
-            send_content_lines.append(line)
+            rows.append({
+                "index": i,
+                "emoji": status_emoji_map.get(res["code"], LogEmoji.ERROR),
+                "status": res["status"],
+                "domain": res["domain"],
+                "points": res["points"],
+                "days": res["days"],
+                "points_total": res["points_total"],
+                "exchange": res["exchange"],
+            })
 
-            if self.config.verbose:
-                log_line = line
-            else:
-                log_line = f"#{i} {res['status']}"
-            log_content_lines.append(log_line)
-
-        content = "\n".join(send_content_lines)
-        log_content = "\n".join(log_content_lines)
-        return title, content, log_content
+        return {
+            "title": title,
+            "rows": rows,
+            "success": success_count,
+            "fail": fail_count,
+            "repeat": repeat_count,
+        }
 
 
-# 初始化日志
 logger = init_logger()
 
 
 def main():
     """主函数"""
+    exit_code = 0
     try:
-        # 1. 加载配置
         logger.info(f"{LogEmoji.START} 步骤 1: 加载配置")
         config = Config()
 
         if not config.cookies_list:
             logger.error(f"{LogEmoji.ERROR} 未找到有效的 Cookie, 退出程序。")
-            title, content = "# 未找到 cookies!", ""
+            payload = {"title": "# 未找到 cookies!", "rows": []}
         else:
-            # 2. 执行签到
             logger.info(f"{LogEmoji.START} 步骤 2: 执行签到")
             checker = Checker(config)
             checker.checkin_all()
 
-            # 3. 格式化结果
             logger.info(f"{LogEmoji.START} 步骤 3: 格式化结果")
-            title, content, log_content = checker.format_results()
-            logger.info(f"\n{LogEmoji.END}========== 签到总结 ==========\n{title}\n{log_content}")
+            payload = checker.format_results()
+            logger.info(f"\n{LogEmoji.END} ========== 签到总结 ==========\n{payload['title']}\n{render_payload(payload)}")
 
     except Exception as e:
         logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
-        title, content, log_content = "# 脚本执行出错", str(e), str(e)
+        payload = {"title": "# 脚本执行出错", "rows": [], "note": str(e)}
+        exit_code = 1
 
-    # 4. 发送推送
     logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
-    push_service = PushService(config if "config" in locals() else "")
-    push_service.send(title, content)
+    push_service = PushService(config if "config" in locals() else None)
+    push_service.send(payload["title"], payload)
     logger.info(f"{LogEmoji.END} 签到完成")
+
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
