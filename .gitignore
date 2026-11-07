@@ -20,6 +20,9 @@ Thumbs.db
 logs
 *.log
 
+# 上游同步检查状态
+.upstream-state/
+
 # Build
 build/
 dist/

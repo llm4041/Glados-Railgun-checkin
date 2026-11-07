@@ -1,0 +1,59 @@
+name: Upstream Sync Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每天 09:00（北京时间）检查上游是否有新提交
+    - cron: '0 1 * * *'
+      timezone: 'Asia/Shanghai'
+
+concurrency:
+  group: upstream-sync-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check upstream updates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      actions: write
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v6
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+
+    # 恢复上次已通知的上游 SHA，避免同一提交重复推送
+    - name: Restore notified state
+      uses: actions/cache/restore@v4
+      with:
+        path: .upstream-state
+        key: upstream-state-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: upstream-state-
+
+    - name: Check upstream
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+      run: python scripts/check_upstream.py
+
+    - name: Save notified state
+      uses: actions/cache/save@v4
+      with:
+        path: .upstream-state
+        key: upstream-state-${{ github.run_id }}-${{ github.run_attempt }}
