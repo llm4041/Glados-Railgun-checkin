@@ -106,7 +106,7 @@
 | --- | --- | --- |
 | PushDeer | `PUSHDEER_SENDKEY` | [pushdeer.com](https://www.pushdeer.com/product.html) 下载 App，在 App 内获取 pushkey |
 | Server酱 | `SERVERCHAN_SENDKEY` | [sct.ftqq.com](https://sct.ftqq.com/) 微信扫码登录，在页面获取 SendKey |
-| 企业微信 | `WEBHOOK_URL` | 群聊右上角 → 群机器人 → 添加机器人 → 复制 Webhook 地址 |
+| 企业微信 | `WEBHOOK_URL` | 群聊右上角 → 群机器人 → 添加机器人 → 复制 Webhook 地址（由 `scripts/wecom_notify.py` 提供，上游无此功能） |
 
 三个可单独或同时配置（都发，任一成功即视为成功）；都不配则跳过推送，不影响签到。
 

@@ -635,13 +635,17 @@ class Accounts:
 
 
 def earned_points(raw: Dict) -> int:
-    """本次签到所得积分：优先签到记录 list[0].change（顶层 points 未必是本次所得）"""
+    """本次签到所得积分"""
+    points = to_int(raw.get("points"))
+    if points is not None:
+        return points
+
     records = raw.get("list")
     if isinstance(records, list) and records and isinstance(records[0], dict):
         change = to_int(records[0].get("change"))
         if change is not None:
             return change
-    return to_int(raw.get("points", 0)) or 0
+    return 0
 
 
 def log_reject(code: int, raw: Dict, message: str, domain: str, log: Callable[..., None], ua_hint: str = "") -> None:
@@ -675,25 +679,49 @@ def parse_checkin(raw: Optional[Dict], domain: str, log: Callable[..., None], ua
             log(LogEmoji.ERROR, f"签到响应格式异常（{type(raw).__name__}）", True)
         return result
 
-    code = raw.get("code", -2)
+    code = raw.get("code")
+    if isinstance(code, str) and code.strip().isdigit():
+        code = int(code.strip())
     message = str(raw.get("message", "无消息字段"))
     points = earned_points(raw)
 
-    # token 与域名不一致时服务端返回 "please checkin via https://..."，此响应 code 可能为 0，
-    # 必须优先拦截，否则会被误判为签到成功。
+    # token 与域名不一致时服务端返回 "please checkin via https://..."，此响应 code 可能为 0
     if "please checkin via" in message.lower():
         log(LogEmoji.ERROR, f"签到被拒：{message}（服务端认定签到域名不符）", True)
         return result
 
-    if code == CheckinStatus.SUCCESS.value:
+    # ① 设备不匹配
+    if code == 4 and raw.get("reason") == "device-mismatch":
+        log_reject(4, raw, message, domain, log, ua_hint)
+        return result
+
+    # ②~④ ：repeated「已签到」，code==0 成功
+    repeated = raw.get("repeated")
+    if isinstance(repeated, bool):
+        if repeated:
+            status = CheckinStatus.REPEAT
+        else:
+            status = CheckinStatus.SUCCESS if code == CheckinStatus.SUCCESS.value else CheckinStatus.FAILURE
+    elif code == CheckinStatus.SUCCESS.value:
+        status = CheckinStatus.SUCCESS
+    elif code == CheckinStatus.REPEAT.value:
+        status = CheckinStatus.REPEAT
+    elif raw.get("checkedIn") is True:
+        status = CheckinStatus.REPEAT
+    else:
+        status = CheckinStatus.FAILURE
+
+    if status is CheckinStatus.SUCCESS:
         log(LogEmoji.SUCCESS, f"{{ code : {code}, points : {points}, message : {message} }}")
         result.points = points
         result.code = CheckinStatus.SUCCESS
-    elif code == CheckinStatus.REPEAT.value:
-        log(LogEmoji.REPEAT, f"{{ code : {code}, message : {message} }}", True)
+    elif status is CheckinStatus.REPEAT:
+        log(LogEmoji.REPEAT, f"{{ code : {code}, repeated : {repeated}, message : {message} }}", True)
         result.code = CheckinStatus.REPEAT
-    else:
+    elif isinstance(code, int) and not isinstance(code, bool):
         log_reject(code, raw, message, domain, log, ua_hint)
+    else:
+        log(LogEmoji.ERROR, f"签到响应缺少 code 字段，无法判定结果（message={message}）", True)
     return result
 
 
@@ -984,7 +1012,6 @@ class Config:
 
     ENV_PUSH_KEY = "PUSHDEER_SENDKEY"
     ENV_SERVERCHAN_KEY = "SERVERCHAN_SENDKEY"
-    ENV_WEBHOOK = "WEBHOOK_URL"
     ENV_COOKIES = "GLADOS_COOKIES"
     ENV_EXCHANGE_PLAN = "GLADOS_EXCHANGE_PLAN"
     ENV_VERBOSE = "GLADOS_VERBOSE"
@@ -996,7 +1023,6 @@ class Config:
         self.env = env if env is not None else os.environ
         self.push_key = ""
         self.serverchan_key = ""
-        self.webhook_url = ""
         self.accounts = Accounts()
         self.exchange_plan = self.DEFAULT_EXCHANGE_PLAN
         self.verbose = self.DEFAULT_VERBOSE
@@ -1023,7 +1049,7 @@ class Config:
         logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.accounts)} 个账号用于签到。")
         for account in self.accounts:
             logger.info(f"{LogEmoji.INFO} {LogEmoji.COOKIE}[{account.label}] {LogEmoji.DOMAIN}[{account.origin or '待探测'}] UA={'自定义' if account.user_agent else '默认'}")
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if self.push_key else '未设置'}，" f"{self.ENV_SERVERCHAN_KEY} {'已设置' if self.serverchan_key else '未设置'}，" f"{self.ENV_WEBHOOK} {'已设置' if self.webhook_url else '未设置'}。")
+        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if self.push_key else '未设置'}，" f"{self.ENV_SERVERCHAN_KEY} {'已设置' if self.serverchan_key else '未设置'}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
         logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
 
@@ -1031,11 +1057,7 @@ class Config:
         return (self.env.get(key) or "").strip()
 
     def _load_push_keys(self) -> None:
-        for key, env_name in (
-            ("push_key", self.ENV_PUSH_KEY),
-            ("serverchan_key", self.ENV_SERVERCHAN_KEY),
-            ("webhook_url", self.ENV_WEBHOOK),
-        ):
+        for key, env_name in (("push_key", self.ENV_PUSH_KEY), ("serverchan_key", self.ENV_SERVERCHAN_KEY)):
             value = self._get(env_name)
             setattr(self, key, value)
             if not value:
@@ -1115,10 +1137,7 @@ class Report:
             r = entry.result
             emoji, status = STATUS_META.get(r.code, (LogEmoji.ERROR, "签到失败"))
             name_cell = f"{entry.name or '未命名'}  " if show_name else ""
-            line = (
-                f"#{entry.index}  {name_cell}{emoji} {status}  {r.domain}  "
-                f"获得 {r.points} 积分 · 剩余 {format_days(r.days)} · 总 {format_points(r.points_total)}"
-            )
+            line = f"#{entry.index}  {name_cell}{emoji} {status}  {r.domain}  " f"获得 {r.points} 积分 · 剩余 {format_days(r.days)} · 总 {format_points(r.points_total)}"
             if r.exchange:
                 line += f" · {r.exchange}"
             if r.note:
@@ -1198,32 +1217,6 @@ class ServerChanBackend(PushBackend):
             return False
 
 
-class WecomBackend(PushBackend):
-    """企业微信群机器人 Webhook 后端"""
-
-    name = "企业微信"
-
-    def __init__(self, webhook_url: str):
-        self.webhook_url = webhook_url
-
-    def send(self, report: Report) -> bool:
-        try:
-            resp = requests.post(
-                self.webhook_url,
-                json={"msgtype": "text", "text": {"content": f"{report.title}\n{self._render(report)}"}},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("errcode") == 0:
-                return True
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 接口返回 {data}")
-            return False
-        except Exception as e:  # noqa: BLE001 - 推送失败不应影响主流程
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
-            return False
-
-
 class PushService:
     """聚合多个推送后端，向全部已配置的后端发送（都发）"""
 
@@ -1235,8 +1228,6 @@ class PushService:
             self.backends.append(PushDeerBackend(config.push_key))
         if config.serverchan_key:
             self.backends.append(ServerChanBackend(config.serverchan_key))
-        if config.webhook_url:
-            self.backends.append(WecomBackend(config.webhook_url))
 
     def send(self, report: Report) -> bool:
         """向所有已配置后端发送，任一成功即视为成功"""

@@ -51,17 +51,17 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    # 执行 签到脚本
+    # 执行 签到脚本（wecom_notify.py 复用 checkin.py，额外追加企业微信后端）
     - name: Running checkin
       run: |
-        python checkin.py
+        python scripts/wecom_notify.py
       env:
         PUSHDEER_SENDKEY: ${{ secrets.PUSHDEER_SENDKEY }}
         SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
         GLADOS_COOKIES: ${{ secrets.GLADOS_COOKIES }}
         GLADOS_EXCHANGE_PLAN: ${{ secrets.GLADOS_EXCHANGE_PLAN }}
         GLADOS_VERBOSE: ${{ secrets.GLADOS_VERBOSE }}
-        WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        WECOM_WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
 
     # 签到失败（配置错误会 exit 1）时也要保活，否则恰好错过最需要提醒的那次
     - name: Keep alive
