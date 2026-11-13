@@ -1,15 +1,19 @@
 name: GLaDOS Check-in
 
 on:
+  # 2026-11-13：官方在签到接口启用 Cloudflare Turnstile 人机验证，
+  # 纯 HTTP 脚本会返回 code=5（Cloudflare verification failed），无法签到。
+  # 定时与 push 触发已暂停，等上游适配 Turnstile 后取消注释即可恢复；
+  # 需要手动验证时可从 Actions 页面 workflow_dispatch 触发。
   workflow_dispatch:
-  push:
-    branches: [ master ]
-    paths-ignore:
-      - 'README.md'
-      - 'imgs/**'
-  schedule:
-    - cron: '18 9,12 * * *'
-      timezone: 'Asia/Shanghai'
+  # push:
+  #   branches: [ master ]
+  #   paths-ignore:
+  #     - 'README.md'
+  #     - 'imgs/**'
+  # schedule:
+  #   - cron: '18 9,12 * * *'
+  #     timezone: 'Asia/Shanghai'
 
 # 定时与手动触发可能重叠：同一时间只保留一个运行，避免重复签到与重复推送
 concurrency:
